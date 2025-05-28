@@ -6,7 +6,7 @@ rng(42);
 % 参数定义
 N = 40; % 总数据点数
 N_train = 30; % 训练集数据点数
-M = 2; % 铰链函数的数量
+M = 1; % 铰链函数的数量
 n_a = 1; % 输出滞后阶数
 n_b = 1; % 输入滞后阶数
 s = ones(M, 1); % 权重系数
@@ -16,27 +16,27 @@ theta_max = 5 * ones(n_a + n_b + 1, M); % theta_i 的上界
 D_bar = 5 * ones(M, 1); % 判别阈值
 H_bar = randn(M, n_a + n_b); % 判别矩阵
 m0 = 0.1 * ones(M, 1); % 小值
+M_w = 1e6; % 大数
+p = 0.8; % 覆盖率参数
 w = randn(n_a + n_b + 1, 1); % 权重向量
 
 % 初始化输入和输出序列
-y = zeros(N, 1); % 观测值 (输出)
-u = randn(N, 1); % 随机生成输入值 (外生输入)
+y_full = zeros(N+1, 1); % 观测值 (输出)
+u_full = randn(N+1, 1); % 随机生成输入值 (外生输入)
+y_full(1) = 0.35 * randn;
+u_full(1) = 0.25 * rand;
 
 % 根据模型生成数据
 noise_level = 0.0; % 噪声水平
-for t = 2:N
-    y(t) = 0.8 * y(t-1) + 0.4 * u(t-1) - 0.1 + ...
-    max(-0.3 * y(t-1) + 0.6 * u(t-1) + 0.3, 0) + ...
-    max(-0.5 * y(t-1) + 0.4 * u(t-1) + 0.2, 0) + ...
+for t = 2:N+1
+    y_full(t) = 0.8 * y_full(t-1) + 0.4 * u_full(t-1) - 0.1 + ...
+    max(-0.3 * y_full(t-1) + 0.6 * u_full(t-1) + 0.3, 0) + ...
     noise_level * randn;
 end
 
-% noise_level = 0.0; % 噪声水平
-% for t = 2:N
-%     y(t) = 0.8 * y(t-1) + 0.4 * u(t-1) - 0.1 + ...
-%     max(-0.3 * y(t-1) + 0.6 * u(t-1) + 0.3, 0) + ...
-%     noise_level * randn;
-% end
+% 重新映射为N长度序列（丢弃y0和u0)
+y = y_full(2:end); 
+u = u_full(2:end); 
 
 % 将前 N_train 数据用于识别模型，其余数据用于预测
 y_train = y(1:N_train);
@@ -46,33 +46,25 @@ u_test = u(N_train+1:end);
 
 % 构建 phi 矩阵，直接包含常数项
 phi = ones(n_a + n_b + 1, N);
-for t = max(n_a, n_b)+1:N
-    % phi(2:end, t) = [y(t-1); u(t-1)];
-    % 构建 phi 矩阵的列
-    phi(2:n_a+1, t) = y(t-1:-1:t-n_a);  % 添加 y(t-1), y(t-2), ..., y(t-n_a)
-    phi(n_a+2:end, t) = u(t-1:-1:t-n_b);  % 添加 u(t-1), u(t-2), ..., u(t-n_b)
+phi(2,1,1) = y_full(1);
+phi(3,1,1) = u_full(1);
+for t = 2:N
+    phi(2:end, t) = [y(t-1); u(t-1)];
 end
-
 % 构建训练集的 phi 矩阵，直接包含常数项
-phi_train = ones(n_a + n_b + 1, N_train); % 初始化 phi 矩阵
-% phi_train(1,1,1) = 1;
-% phi_train(2,1,1) = 0;
-% phi_train(3,1,1) = 0;
-for t = max(n_a, n_b)+1:N_train
-    % phi_train(2:end, t) = [y_train(t-1); u_train(t-1)];
-    phi_train(2:n_a+1, t) = y_train(t-1:-1:t-n_a);  % 添加 y(t-1), y(t-2), ..., y(t-n_a)
-    phi_train(n_a+2:end, t) = u_train(t-1:-1:t-n_b);  % 添加 u(t-1), u(t-2), ..., u(t-n_b)
-end
+phi_train = phi(:, 1:N_train); 
 
-% 初始化 YALMIP 优化变量
+% 初始化 YALMIP 优化变量  
 varepsilon = sdpvar(N_train, 1); % 误差项 ε_t
 theta_0 = sdpvar(n_a + n_b + 1, 1); % 基础回归系数 θ_0
 theta = sdpvar(n_a + n_b + 1, M); % 分段线性函数的系数 θ_i
 z = sdpvar(M, N_train, 'full'); % 辅助变量 z_{it}
 delta = binvar(M, N_train, 'full'); % 二元变量 δ_{it}
+rho = sdpvar(1, 1); % 不确定性集大小,?rho dimension depends on # of output variable, should be 1 in your case
+eta = binvar(N_train, 1); % 二元变量 η_{it} % dimension depends only on time t
 
 % 目标函数
-objective = sum(varepsilon);
+objective = sum(varepsilon) + sum(rho);
 
 % 初始化约束条件集合
 constraints = [];
@@ -84,7 +76,15 @@ for t = 1:N_train
         varepsilon(t) >= y_train(t) - phi_t' * theta_0 - sum(s .* z(:, t))];
     constraints = [constraints, ...
         varepsilon(t) >= phi_t' * theta_0 + sum(s .* z(:, t)) - y_train(t)];
+    constraints = [constraints, varepsilon(t) >= 0];    
+    % 修改后的不确定性集约束
+    constraints = [constraints, ...
+        varepsilon(t) <= rho + M_w * (1 - eta(t))];
 end
+% 不确定性集约束
+constraints = [constraints, rho >= 0];
+% 修改后的覆盖率约束
+constraints = [constraints, sum(eta) >= p * N_train];
 
 % 添加变量的上下界及二元变量相关约束
 for i = 1:M
@@ -116,6 +116,7 @@ if sol.problem == 0
     optimal_varepsilon = value(varepsilon) % 最优误差项 ε_t
     optimal_theta_0 = value(theta_0)       % 最优 θ_0
     optimal_theta = value(theta)           % 最优 θ
+    optimal_rho = value(rho)               % 不确定集大小
 else
     disp('Failed to find optimal solution.');
     disp(sol.info);
@@ -124,39 +125,24 @@ end
 
 % 计算训练集的预测值
 predicted_y_train = zeros(N_train, 1);
-for t = 2:N_train
+for t = 1:N_train
     phi_t = phi_train(:, t);
-    for i = 1:M
-        tmp = s(i) * max(phi_t' * optimal_theta(:, i), 0);
-        predicted_y_train(t) = predicted_y_train(t) + tmp;
-    end
-    predicted_y_train(t) = predicted_y_train(t) + phi_t' * optimal_theta_0;
+    predicted_y_train(t) = phi_t' * optimal_theta_0 + sum(s .* value(z(:, t)));
 end
 
 % 构建测试集的 phi 矩阵，直接包含常数项
 phi_test = ones(n_a + n_b + 1, N - N_train);
-for t = max(n_a, n_b)+1:(N - N_train)
-    % phi_test(2:end, t) = [y_test(t-1); u_test(t-1)];
-    phi_test(2:n_a+1, t) = y_test(t-1:-1:t-n_a);
-    phi_test(n_a+2:end, t) = u_test(t-1:-1:t-n_b);
+for t = 2:(N - N_train)
+    phi_test(2:end, t) = [y_test(t-1); u_test(t-1)];
 end
 
 % 计算测试集的预测值
 predicted_y_test = zeros(N - N_train, 1);
-for i = 1:M
-    tmp = s(i) * max(phi(:, N_train + 1)' * optimal_theta(:, i), 0);
-    predicted_y_test(1) = predicted_y_test(1) + tmp;
-end
-predicted_y_test(1) = predicted_y_test(1) + phi(:, N_train + 1)' * optimal_theta_0;
-% predicted_y_test(1) = phi(:, N_train + 1)' * optimal_theta_0 + ...
-% sum(s .* max(phi(:, N_train + 1)' * optimal_theta, 0));
+predicted_y_test(1) = phi(:, N_train + 1)' * optimal_theta_0 + ...
+sum(s .* max(phi(:, N_train + 1)' * optimal_theta, 0));
 for t = 2:(N - N_train)
     phi_t_test = phi_test(:, t);
-    for i = 1:M
-        tmp = s(i) * max(phi_t_test' * optimal_theta(:, i), 0);
-        predicted_y_test(t) = predicted_y_test(t) + tmp;
-    end
-    predicted_y_test(t) = predicted_y_test(t) + phi_t_test' * optimal_theta_0;
+    predicted_y_test(t) = phi_t_test' * optimal_theta_0 + sum(s .* max(phi_t_test' * optimal_theta, 0));
 end
 
 % 绘制结果
