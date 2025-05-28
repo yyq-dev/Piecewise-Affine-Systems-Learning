@@ -6,29 +6,42 @@ rng(42);
 % 参数定义
 N = 40; % 总数据点数
 N_train = 30; % 训练集数据点数
-M = 1; % 铰链函数的数量
+M = 1; % 铰链函数的数量,  
 n_a = 1; % 输出滞后阶数
 n_b = 1; % 输入滞后阶数
 s = ones(M, 1); % 权重系数
 M_theta = 10 * ones(M, 1); % z_{it} 的上界
 theta_min = -5 * ones(n_a + n_b + 1, M); % theta_i 的下界
 theta_max = 5 * ones(n_a + n_b + 1, M); % theta_i 的上界
-D_bar = 5 * ones(M, 1); % 判别阈值
-H_bar = randn(M, n_a + n_b); % 判别矩阵
+% D_bar = 5 * ones(M, 1); % 判别阈值?
+% H_bar = randn(M, n_a + n_b); % 判别矩阵?
 m0 = 0.1 * ones(M, 1); % 小值
-w = randn(n_a + n_b + 1, 1); % 权重向量
+w = randn(n_a + n_b + 1, 1); % 任意非零向量
 
 % 初始化输入和输出序列
-y = zeros(N, 1); % 观测值 (输出)
-u = randn(N, 1); % 随机生成输入值 (外生输入)
+y_full = zeros(N+1, 1); % 观测值 (输出)
+u_full = randn(N+1, 1); % 随机生成输入值 (外生输入)
+y_full(1) = 0.35 * randn;
+u_full(1) = 0.25 * rand;
 
 % 根据模型生成数据
-noise_level = 0.5; % 噪声水平
-for t = 2:N
-    y(t) = 0.8 * y(t-1) + 0.4 * u(t-1) - 0.1 + ...
-    max(-0.3 * y(t-1) + 0.6 * u(t-1) + 0.3, 0) + ...
+noise_level = 0.0; % 噪声水平,std
+for t = 2:N+1 
+    % in this way, your vector y index is y=[y(1),y(2),...y(N)]
+    % in fact, your data vector y should be 1 dimension larger than phi,
+    % y should be y=[y(0), y(1), y(2),....,y(N)], you can generate
+    % N+1 input u and N+1 output y, consider the first element as y0 and
+    % u0, use them to calculate phi, and discard them, then the index will
+    % be correct when you write the constraints
+
+    y_full(t) = 0.8 * y_full(t-1) + 0.4 * u_full(t-1) - 0.1 + ...
+    max(-0.3 * y_full(t-1) + 0.6 * u_full(t-1) + 0.3, 0) + ...
     noise_level * randn;
 end
+
+% 重新映射为N长度序列（丢弃y0和u0)
+y = y_full(2:end); 
+u = u_full(2:end); 
 
 % 将前 N_train 数据用于识别模型，其余数据用于预测
 y_train = y(1:N_train);
@@ -37,19 +50,17 @@ y_test = y(N_train+1:end);
 u_test = u(N_train+1:end);
 
 % 构建 phi 矩阵，直接包含常数项
-phi = ones(n_a + n_b + 1, N);
+phi = ones(n_a + n_b + 1, N); 
+% u(1-1) should not be 1, it should from your random u,
+% same as y(1-1)
+phi(2,1,1) = y_full(1);
+phi(3,1,1) = u_full(1);
 for t = 2:N
     phi(2:end, t) = [y(t-1); u(t-1)];
 end
 
-% 构建训练集的 phi 矩阵，直接包含常数项
-phi_train = ones(n_a + n_b + 1, N_train); % 初始化 phi 矩阵
-% phi_train(1,1,1) = 1;
-% phi_train(2,1,1) = 0;
-% phi_train(3,1,1) = 0;
-for t = 2:N_train
-    phi_train(2:end, t) = [y_train(t-1); u_train(t-1)];
-end
+% 构建训练集的 phi 矩阵，直接包含常数项?why not directly use phi(:,1:N_train)?
+phi_train = phi(:, 1:N_train); 
 
 % 初始化 YALMIP 优化变量
 varepsilon = sdpvar(N_train, 1); % 误差项 ε_t
@@ -65,12 +76,14 @@ objective = sum(varepsilon);
 constraints = [];
 
 % 添加误差项的约束条件
+% need constraint varepsilon_t >= 0
 for t = 1:N_train
     phi_t = phi_train(:, t); % 获取当前 phi_t
     constraints = [constraints, ...
         varepsilon(t) >= y_train(t) - phi_t' * theta_0 - sum(s .* z(:, t))];
     constraints = [constraints, ...
         varepsilon(t) >= phi_t' * theta_0 + sum(s .* z(:, t)) - y_train(t)];
+    constraints = [constraints, varepsilon(t) >= 0];
 end
 
 % 添加变量的上下界及二元变量相关约束
@@ -111,7 +124,7 @@ end
 
 % 计算训练集的预测值
 predicted_y_train = zeros(N_train, 1);
-for t = 2:N_train
+for t = 1:N_train
     phi_t = phi_train(:, t);
     predicted_y_train(t) = phi_t' * optimal_theta_0 + sum(s .* value(z(:, t)));
 end
