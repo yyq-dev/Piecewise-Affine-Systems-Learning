@@ -3,7 +3,7 @@ clear; clc; close all;
 yalmip('clear');
 rng(42);
 
-load('reac2x_SNO_dataf.mat'); % 加载数据
+load('reac2x_SNO_data.mat'); % 加载数据
 
 % 参数定义
 N = length(time); % 总数据点数
